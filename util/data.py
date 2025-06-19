@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import os
 import torch
@@ -9,15 +10,21 @@ from util.utils import normalize_nonzero
 
 
 class MBESDataset(Dataset):
-    def __init__(self, root_dir, transform=None, byt=False, aug_multiplier=0):
+    def __init__(self, root_dir, transform=None, byt=False, aug_multiplier=0, using_hillshade=False, using_inpainted=False):
         self.root_dir = root_dir
         self.transform = transform
         self.byt = byt
         self.aug_multiplier = aug_multiplier  # Number of additional augmented samples per image
         self.img_size = 200
+        
+        self.using_hillshade = using_hillshade
+        self.using_inpainted = using_inpainted
 
-        self.file_list = [file_name for file_name in os.listdir(root_dir) if "_image.npy" in file_name]
-        self.resize = transforms.Resize((self.img_size, self.img_size), interpolation=transforms.InterpolationMode.NEAREST)  # Resize to 501x501
+        if self.using_inpainted:
+            self.file_list = [file_name for file_name in os.listdir(os.path.join(root_dir, "inpainted")) if "_image.npy" in file_name]
+        else:
+            self.file_list = [file_name for file_name in os.listdir(root_dir) if "_image.npy" in file_name]
+        self.resize = transforms.Resize((self.img_size, self.img_size), interpolation=transforms.InterpolationMode.NEAREST)  # Resize to 200 x 200
 
         self.expanded_file_list = [(file_name, i) for file_name in self.file_list for i in range(aug_multiplier + 1)]
 
@@ -26,54 +33,68 @@ class MBESDataset(Dataset):
  
     def __getitem__(self, idx):
         file_name, aug_idx = self.expanded_file_list[idx]
-        image_name = os.path.join(self.root_dir, file_name)
+        image_name = os.path.join(self.root_dir, "inpainted", file_name) if self.using_inpainted else os.path.join(self.root_dir, file_name)
         label_name = image_name.replace("_image.npy", "_label.npy")
 
-        # Image is already a float
-        image = torch.from_numpy(np.load(image_name))
+        # --- Load image ---
+        image = torch.from_numpy(np.load(image_name)).float()  # (H, W)
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # (1, H, W)
 
+        image = self.resize(image)  # (1, H, W)
+        mask = (image[0] == 0)
+        image[0] = normalize_nonzero(image[0])
+
+        # --- Load label ---
         if os.path.exists(label_name):
-            label = torch.from_numpy(np.load(label_name)) > 0
+            label_np = np.load(label_name).astype(np.int32) > 0
         else:
-            label = torch.zeros((self.img_size, self.img_size), dtype=torch.long)  # Assign all zeros if no label
+            label_np = np.zeros((self.img_size, self.img_size), dtype=np.int32)
 
-        
-        # Resize image and label for transformationsdef clear_directory(directory_path):
-        image = image.squeeze()
-        if len(image.shape) < 3:
-            image = image.unsqueeze(0)  # Ensure shape is (1, H, W) for single channel image 
-            image = torch.cat([image, image, image], dim=0)
+        # Resize using nearest neighbor to preserve {-1, 0, 1}
+        label = torch.from_numpy(label_np).unsqueeze(0).unsqueeze(0)  # (1, H, W)
+        label = torch.nn.functional.interpolate(label.float(), size=(self.img_size, self.img_size), mode='nearest').squeeze(0).squeeze(0).long()  # (H, W)
 
-        # Normalize image to [0, 1], might improve results but we may want to maintain depth values
-        image = self.resize(image)  # Resize
-        mask = (image[0] == 0).int()
+        # Temporarily turn -1 → 255 for Albumentations
+        label[label == -1] = 255
 
-        # Testing, looks fine here 
-        depth_grid = image.permute(1,2,0).cpu().numpy()
+        # --- Optional hillshade ---
+        if self.using_hillshade:
+            hillshade_file_name, _ = self.expanded_file_list[idx]
+            hillshade_path = os.path.join(self.root_dir, "hillshade", hillshade_file_name)
+            hillshade = torch.from_numpy(np.load(hillshade_path)).float().unsqueeze(0)  # (1, H, W)
+            hillshade = self.resize(hillshade) / 255.0
+            image = torch.cat([image, hillshade], dim=0)  # (2, H, W)
 
-        image = normalize_nonzero(image)
+        # --- Albumentations ---
+        image_npy = image.permute(1, 2, 0).numpy().astype(np.float32)  # (H, W, C)
+        mask_npy = (mask.numpy() * 255).astype(np.int32)
+        label_npy = label.numpy().astype(np.int32)
+        masks = [mask_npy, label_npy]
 
-        label = label.unsqueeze(0).float()  # Ensure shape is (1, H, W) for label
-        label = self.resize(label).squeeze(0).long()  # Resize and remove singleton dimension
-        image = image.permute(1,2,0) # permute for transformations
+        if self.transform:
+            transformed = self.transform(image=image_npy, masks=masks)
+            image_npy = transformed["image"]
+            masks = transformed["masks"]
 
-        # print(file_name, image.mean())
+        # Convert back to torch
+        image = torch.tensor(image_npy).permute(2, 0, 1).float()
+        transformed_mask = torch.tensor(masks[0], dtype=torch.long)
+        label = torch.tensor(masks[1], dtype=torch.long)
 
-        # Convert to numpy for transformations
-        image, label, mask = image.numpy().astype(np.float32), label.numpy(), mask.numpy()
-
-        # label[] = -1
-        masks = [(mask * 255).astype(np.int32), label.astype(np.int32)]
-
-        # Apply transforms if provided
-        if self.transform: 
-            transformed = self.transform(image=image, masks=masks)
-            image, masks = transformed["image"], transformed["masks"]
-
-        transformed_mask = torch.tensor(masks[0], dtype = torch.long)
-        label = torch.tensor(masks[1], dtype = torch.long)
-        # label = masks[1]
+        # Post-transform fix: 255 back to -1
+        label[label == 255] = -1
         label[transformed_mask == 255] = -1
+
+        return {
+            'image': image,
+            'label': label,
+            'metadata': {
+                "image_name": image_name,
+                "label_name": label_name
+            }
+        }
+
 
         # Save images to confirm augmentations
         # np.save(os.path.join('QGIS_Chunks', os.path.basename(file_name)), image) # Save image
@@ -84,4 +105,43 @@ class MBESDataset(Dataset):
         #     lab = Image.fromarray((127.5*label.numpy()+127.5).astype(np.uint8)) # scaled for viz purposes 
         #     lab.save(os.path.join('Augmented_Ships', os.path.basename(file_name.replace("_image.npy", "_augmented_label.png")))) # Save image
 
-        return {'image': torch.tensor(image).permute(2, 0, 1).float(), 'label': label, 'metadata': {"image_name": image_name, "label_name": label_name}}
+        return {'image': image, 'label': label, 'metadata': {"image_name": image_name, "label_name": label_name}}
+    
+    def compute_hillshade(self, elevation, azimuth=315, altitude=45, cell_size=1.0):
+        """
+        Generate hillshade from a north-up aligned elevation array, preserving size.
+
+        Parameters:
+            elevation (ndarray): 2D NumPy array of elevation values.
+            azimuth (float): Sun azimuth in degrees (clockwise from north).
+            altitude (float): Sun altitude angle in degrees above horizon.
+            cell_size (float): Spatial resolution in both x and y directions.
+
+        Returns:
+            hillshade (ndarray): 2D hillshade image (uint8), same shape as input.
+        """
+        # Convert angles to radians
+        azimuth_rad = np.radians(360.0 - azimuth + 90.0)
+        altitude_rad = np.radians(altitude)
+
+        # Pad elevation to avoid edge loss
+        padded = np.pad(elevation, pad_width=1, mode='edge')
+
+        # Compute gradients (Horn's method)
+        dzdx = ((padded[1:-1, 2:] - padded[1:-1, :-2]) / (2 * cell_size))
+        dzdy = ((padded[2:, 1:-1] - padded[:-2, 1:-1]) / (2 * cell_size))
+
+        # Compute slope and aspect
+        slope = np.arctan(np.hypot(dzdx, dzdy))
+        aspect = np.arctan2(dzdy, -dzdx)
+        aspect = np.where(aspect < 0, 2 * np.pi + aspect, aspect)
+
+        # Illumination from the sun
+        shaded = (
+            np.sin(altitude_rad) * np.cos(slope) +
+            np.cos(altitude_rad) * np.sin(slope) * np.cos(azimuth_rad - aspect)
+        )
+
+        hillshade = np.clip(shaded, 0, 1) * 255
+        return hillshade.astype(np.uint8)
+

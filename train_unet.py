@@ -14,7 +14,7 @@ from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.metrics import accuracy_score, confusion_matrix, jaccard_score, f1_score, precision_score
 
 from util.data import MBESDataset
-from util.models import Unet
+from models.unet.unet import Unet
 from util.utils import clear_directory, save_combined_image
 
 
@@ -30,7 +30,7 @@ from util.utils import clear_directory, save_combined_image
 # TRAIN #
 #########
 
-def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, lr):
+def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, lr, using_hillshade, using_inpainted):
 
     model = Unet(3, 2)
     model.cuda()
@@ -58,14 +58,10 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
     
     aug_multiplier = 0 # number of extra augmentations per image. If 1, dataset will be 2*(original dataset size)
     
-    train_dataset = MBESDataset(train_path, byt=False, transform=augmentation, aug_multiplier=aug_multiplier)
-    val_dataset = MBESDataset(val_path, byt=False)
+    train_dataset = MBESDataset(train_path, byt=False, transform=augmentation, aug_multiplier=aug_multiplier, using_hillshade=using_hillshade, using_inpainted=using_inpainted)
+    val_dataset = MBESDataset(val_path, byt=False, using_hillshade=using_hillshade, using_inpainted=using_inpainted)
 
     print("Train dataset length:", len(train_dataset))
-    # clear_directory('Augemented_Ships')
-    # val_size = int(len(dataset) * validation_split)
-    # train_size = len(dataset) - val_size
-    # train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
     # Dataloaders for train and validation sets
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
@@ -98,6 +94,7 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
         train_iou = []
         for data in train_loader:
             image = data['image'].cuda()
+            image = torch.hstack([image, image, image])
             label = data['label'].cuda()
 
             optim.zero_grad()
@@ -126,22 +123,24 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
             #     wandb.log({"Train Label": wandb.Image(label[0].cpu().numpy(), caption="Train Label")})
         
         avg_train_iou = np.mean(train_iou)
-        wandb.log({"Train Loss": np.mean(train_loss), "Train IOU": avg_train_iou})
+        wandb.log({"Epoch": epoch, "Train Loss": np.mean(train_loss), "Train IOU": avg_train_iou})
 
         # Validation loop
         model.eval()
         val_loss = []
         val_iou = []
         preds = []
-        if epoch % 50 == 0:
+        if epoch % 25 == 0:
             with torch.no_grad():
                 for idx, data in enumerate(val_loader):
                     image = data['image'].cuda()
+                    image = torch.hstack([image, image, image])
                     label = data['label'].cuda()
                     # image = (image - image.min(dim=(1,2,3)))/(image.max(dim=(1,2,3)) - image.min(dim=(1,2,3)))
                     pred = model(image)
                     loss = ce_loss(pred, label.long())
                     pred = pred.argmax(dim=1)
+                    pred[label == -1] = -1
                     preds.append(pred)
                     label = label.cpu().detach().numpy()
                     pred = pred.cpu().detach().numpy()
@@ -151,15 +150,15 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
 
                     val_loss.append(loss.item())
                     val_iou.append(iou)
-
-                    wandb.log({'VAL__' + data['metadata']['image_name'][idx].split('/')[-1]: wandb.Image(np.hstack([image[idx].permute(1, 2, 0).cpu().numpy()[:,:,0], 
-                                                                                                    np.zeros((label[idx].shape[0], 5)), 
-                                                                                                    label[idx], 
-                                                                                                    np.zeros((label[idx].shape[0], 5)), 
-                                                                                                    pred[idx]]), caption="Input | Ground Truth | Prediction")})
+                    
+                    for j in range(len(label)):
+                        wandb.log({'VAL__' + data['metadata']['image_name'][j].split('/')[-1]: wandb.Image(np.hstack([image[j].permute(1, 2, 0).cpu().numpy()[:,:,0], 
+                                                                                                    np.zeros((label[j].shape[0], 5)), 
+                                                                                                    label[j], 
+                                                                                                    np.zeros((label[j].shape[0], 5)), 
+                                                                                                    pred[j]]), caption="Input | Ground Truth | Prediction")})
 
         
-            # preds = torch.stack(preds, dim=0)
             model.train()
             avg_val_loss = np.mean(val_loss)
             avg_val_iou = np.mean(val_iou)
@@ -176,8 +175,6 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
         if (epoch + 1) % 10 == 0:
             torch.save(model.state_dict(), curr_save_path)
         
-
-        # torch.save(model.state_dict(), os.path.join(save_path, "model.pt"))
 
 
 ########
@@ -330,9 +327,6 @@ def test(test_path, weight_path, save_images = False, pred_path=None, batch_size
 ########
 
 def evaluate(batch_size):
-    # Open wandb
-    # wandb.init(project="mbes")
-
     model = Unet(3, 2)
     model.cuda()
 
@@ -393,13 +387,15 @@ if __name__ == "__main__":
                }
     )
     
-    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic",
-            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic",
+    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
+            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
             model_name=wandb.run.name,
             save_path="./model_weights", 
             num_epochs=EPOCHS, 
             batch_size=BATCH_SIZE, 
-            lr=LEARNING_RATE)
+            lr=LEARNING_RATE,
+            using_hillshade=False,
+            using_inpainted=True)
 
     # Numerous test functions for evaluation; change test folder, model and save path as needed
     # test("Test_Ships_Fixed", "Models/cnp_data_5_latest.pt", save_images=True, pred_path="Predictions/synthetic_ships")
