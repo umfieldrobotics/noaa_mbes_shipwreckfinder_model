@@ -22,19 +22,27 @@ class MBESDataset(Dataset):
 
         if self.using_inpainted:
             self.file_list = [file_name for file_name in os.listdir(os.path.join(root_dir, "inpainted")) if "_image.npy" in file_name]
+            self.original_file_list = [file_name for file_name in os.listdir(os.path.join(root_dir, "original")) if "_image.npy" in file_name] # non inpainted files, we need these to get the mask for the invalid pixels
         else:
             self.file_list = [file_name for file_name in os.listdir(root_dir) if "_image.npy" in file_name]
         self.resize = transforms.Resize((self.img_size, self.img_size), interpolation=transforms.InterpolationMode.NEAREST)  # Resize to 200 x 200
 
         self.expanded_file_list = [(file_name, i) for file_name in self.file_list for i in range(aug_multiplier + 1)]
+        
+        if self.using_inpainted:
+            self.original_expanded_file_list = [(file_name, i) for file_name in self.original_file_list for i in range(aug_multiplier + 1)]
 
     def __len__(self):
         return len(self.expanded_file_list)
  
     def __getitem__(self, idx):
-        file_name, aug_idx = self.expanded_file_list[idx]
+        file_name, _ = self.expanded_file_list[idx]
         image_name = os.path.join(self.root_dir, "inpainted", file_name) if self.using_inpainted else os.path.join(self.root_dir, file_name)
-        label_name = image_name.replace("_image.npy", "_label.npy")
+        label_name = image_name.replace("_image.npy", "_label.npy").replace("inpainted", "original")
+        
+        if self.using_inpainted:
+            original_file_name, _ = self.original_expanded_file_list[idx]
+            original_image_name = os.path.join(self.root_dir, "original", original_file_name)
 
         # --- Load image ---
         image = torch.from_numpy(np.load(image_name)).float()  # (H, W)
@@ -44,6 +52,17 @@ class MBESDataset(Dataset):
         image = self.resize(image)  # (1, H, W)
         mask = (image[0] == 0)
         image[0] = normalize_nonzero(image[0])
+        
+        if self.using_inpainted: # load original (not inpainted) image and use that to generate the maskfor invalid regions
+            original_image = torch.from_numpy(np.load(original_image_name)).float()  # (H, W)
+            if original_image.ndim == 2:
+                original_image = original_image.unsqueeze(0)  # (1, H, W)
+            
+            original_image = self.resize(original_image)  # (1, H, W)
+            original_mask = (original_image[0] == 0)
+            original_image[0] = normalize_nonzero(original_image[0])
+            
+            mask = original_mask
 
         # --- Load label ---
         if os.path.exists(label_name):

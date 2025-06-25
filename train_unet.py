@@ -30,10 +30,12 @@ from util.utils import clear_directory, save_combined_image
 # TRAIN #
 #########
 
-def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, lr, using_hillshade, using_inpainted):
+def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, batch_size, lr, using_hillshade, using_inpainted):
 
-    model = Unet(3, 2)
+    model = Unet(1, 2)
     model.cuda()
+    
+    os.makedirs(os.path.join(save_path, model_arch, model_name), exist_ok=True)
 
     # Load dataset and split into train/validation sets
     # dataset = MBESDataset("/mnt/syn/advaiths/datasets/mbes_data/real_data/Train_Final_filtered", byt=False)
@@ -41,18 +43,9 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
     sec_prob = 0.25
     augmentation = None
     augmentation = A.Compose([
-                                # A.CoarseDropout(p=prob),
                                 A.HorizontalFlip(p=prob), 
                                 A.VerticalFlip(p=prob), 
                                 A.SafeRotate(p=prob, border_mode=cv2.BORDER_REFLECT_101),
-                                # A.RandomResizedCrop(p=prob, size=(200, 200), interpolation=cv2.INTER_NEAREST),
-                                # A.GaussianBlur(p=sec_prob), 
-                                # A.ColorJitter(p=sec_prob), 
-                                # A.AdditiveNoise(p=sec_prob), 
-                                # A.CLAHE(p=sec_prob), 
-                                # A.Defocus(p=sec_prob), 
-                                # A.RandomShadow(p=prob), 
-                                # A.SaltAndPepper(p=sec_prob)
                             ])
 
     
@@ -86,6 +79,8 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
 
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     ce_loss = torch.nn.CrossEntropyLoss(weight=torch.tensor([weight0, weight1]).cuda(), ignore_index=-1)
+    
+    best_iou = 0
 
     # Training loop
     for epoch in tqdm(range(num_epochs), total=num_epochs, desc="Epochs"):
@@ -94,7 +89,6 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
         train_iou = []
         for data in train_loader:
             image = data['image'].cuda()
-            image = torch.hstack([image, image, image])
             label = data['label'].cuda()
 
             optim.zero_grad()
@@ -134,13 +128,11 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
             with torch.no_grad():
                 for idx, data in enumerate(val_loader):
                     image = data['image'].cuda()
-                    image = torch.hstack([image, image, image])
                     label = data['label'].cuda()
                     # image = (image - image.min(dim=(1,2,3)))/(image.max(dim=(1,2,3)) - image.min(dim=(1,2,3)))
                     pred = model(image)
                     loss = ce_loss(pred, label.long())
                     pred = pred.argmax(dim=1)
-                    pred[label == -1] = -1
                     preds.append(pred)
                     label = label.cpu().detach().numpy()
                     pred = pred.cpu().detach().numpy()
@@ -152,10 +144,11 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
                     val_iou.append(iou)
                     
                     for j in range(len(label)):
-                        wandb.log({'VAL__' + data['metadata']['image_name'][j].split('/')[-1]: wandb.Image(np.hstack([image[j].permute(1, 2, 0).cpu().numpy()[:,:,0], 
-                                                                                                    np.zeros((label[j].shape[0], 5)), 
+                        pred[label == -1] = -1
+                        wandb.log({"Val_Epoch": epoch, 'VAL__' + data['metadata']['image_name'][j].split('/')[-1]: wandb.Image(np.hstack([image[j].permute(1, 2, 0).cpu().numpy()[:,:,0], 
+                                                                                                    np.ones((label[j].shape[0], 5)), 
                                                                                                     label[j], 
-                                                                                                    np.zeros((label[j].shape[0], 5)), 
+                                                                                                    np.ones((label[j].shape[0], 5)), 
                                                                                                     pred[j]]), caption="Input | Ground Truth | Prediction")})
 
         
@@ -164,16 +157,19 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
             avg_val_iou = np.mean(val_iou)
             wandb.log({"Validation Loss": avg_val_loss, "Validation IOU": avg_val_iou})
 
-        # Save model every 10 epochs, but make a new one every 1000
-        curr_save_path = os.path.join(save_path, f"{model_name}_latest.pt")  # Always the latest checkpoint
-
-        # Save a new model file every 1000 epochs
-        if (epoch + 1) % 1000 == 0 or epoch + 1 == num_epochs:
-            curr_save_path = os.path.join(save_path, f"{model_name}_e{epoch + 1}.pt")
+        # Save model (best, latest, and every 1000 epochs)
+        curr_save_path = os.path.join(save_path, model_arch, model_name, model_name)
 
         # Save every 10 epochs (including newly named files every 1000 epochs)
         if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), curr_save_path)
+            if (epoch + 1) % 1000 == 0:
+                torch.save(model.state_dict(), curr_save_path + f"e{epoch + 1}.pt")
+            else:
+                torch.save(model.state_dict(), curr_save_path + "_latest.pt")
+        
+        if train_iou[-1] > best_iou:
+            best_iou = train_iou[-1]
+            torch.save(model.state_dict(), curr_save_path + "_best.pt")
         
 
 
@@ -181,145 +177,103 @@ def train(train_path, val_path, model_name, save_path, num_epochs, batch_size, l
 # TEST #
 ########
 
-def test(test_path, weight_path, save_images = False, pred_path=None, batch_size=1):
+def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_inpainted, save_images=False, pred_path=None, batch_size=1):
+    print("Testing " + weight_path)
+    
     # Load the model
-    print(weight_path)
-    model = Unet(3, 2)
+    model = Unet(1, 2)
     model.load_state_dict(torch.load(weight_path))
     model.cuda()
+
     model.eval()
-    # Load all the .npy files within test_path using glob
-    test_files = glob.glob(os.path.join(test_path, "*_image.npy"))
+
+    test_dataset = MBESDataset(test_path, byt=False, using_hillshade=using_hillshade, using_inpainted=using_inpainted)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
+
+    # Set up metric tracking + output files
     ship_iou_list = []
-    terrain_iou_list = []
     f1_list = []
     accuracy_list = []
     precision_list = []
-    score_path = os.path.join(pred_path,"scores.txt")
+    total_tn = 0
+    total_tp = 0
+    total_fn = 0
+    total_fp = 0
 
+    pred_path = os.path.join(pred_path, model_arch, model_name)
     os.makedirs(pred_path, exist_ok=True)
     if save_images:
         clear_directory(pred_path)
-    with open(score_path, "w") as f: # Clear text file
-        f.write("")  # Writing an empty string clears the file
 
-    val_dataset = MBESDataset(test_path, byt=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
+    with torch.no_grad():
+        for data in test_loader:
+            image = data['image'].cuda()
+            label = data['label'].cuda()
 
-    batch_count = 0
-    for data in val_loader:
-        image = data['image'].cuda()
-        label = data['label'].cuda()
+            pred = model(image)
+            pred = pred.argmax(dim=1)
 
-        # pred = model(image[:,0:1,:,:]) # For single channel images
-        pred = model(image)
-        pred = pred.argmax(dim=1)
+            label = label.cpu().detach().numpy()
+            pred = pred.cpu().detach().numpy()
+            
+            valid_data_mask = (label.flatten() != -1)  # Ignore invalid pixels
+            label_flat = label.flatten()[valid_data_mask]
+            pred_flat = pred.flatten()[valid_data_mask]
+            
+            # Initialize flags
+            ship_warned = False
 
-        label = label.cpu().detach().numpy()
-        pred = pred.cpu().detach().numpy()
+            # Compute metrics if labels are available
+            accuracy = accuracy_score(label_flat, pred_flat)  # Flatten to 1D arrays for comparison
 
-        label_flat = label.flatten()
-        pred_flat = pred.flatten()
+            # Compute ship IoU and detect warning; don't count IOU if label and pred are both 0's
+            with warnings.catch_warnings(record=True) as w_ship:
+                warnings.simplefilter("always")
+                ship_iou = jaccard_score(label_flat, pred_flat, zero_division="warn", average='binary', pos_label=1)
+                ship_warned = any(isinstance(w.message, UndefinedMetricWarning) for w in w_ship)
 
-        # Compute metrics if labels are available
-        accuracy = accuracy_score(label_flat, pred_flat)  # Flatten to 1D arrays for comparison
+            f1 = f1_score(label_flat, pred_flat, zero_division=1)
+            precision = precision_score(label_flat, pred_flat, zero_division=1)
+            tn, fp, fn, tp  = confusion_matrix(label_flat, pred_flat, labels=[0,1]).ravel()
+            total_tn += tn
+            total_fp += fp
+            total_fn += fn
+            total_tp += tp
 
-        # Calculate scores only on masked values (produces much lower IOU)
-        valid_data_mask = (label.flatten() != -1)  # Ignore pixels with no data
-        label_flat, pred_flat = label_flat[valid_data_mask], pred_flat[valid_data_mask]
+            accuracy_list.append(accuracy)
+            precision_list.append(precision)
+            f1_list.append(f1)
 
-        # Initialize flags
-        ship_warned = False
-        terrain_warned = False
+            if not ship_warned:
+                ship_iou_list.append(ship_iou)
+            else:
+                ship_iou = np.nan
+                print("ship prediction and label are both empty")
 
-        # Compute ship IoU and detect warning; don't count IOU if label and pred are both 0's
-        with warnings.catch_warnings(record=True) as w_ship:
-            warnings.simplefilter("always")
-            ship_iou = jaccard_score(label_flat, pred_flat, zero_division="warn", average='binary', pos_label=1)
-            ship_warned = any(isinstance(w.message, UndefinedMetricWarning) for w in w_ship)
+            if save_images:
+                mask = (label != -1)
+                pred[mask == 0] = -1 # set areas with no data to -1 for visualization purposes
+                label[mask == 0] == -1 # optional to show no data mask on label in viz
 
-        # Compute terrain IoU and detect warning
-        with warnings.catch_warnings(record=True) as w_terrain:
-            warnings.simplefilter("always")
-            terrain_iou = jaccard_score(label_flat, pred_flat, zero_division="warn", average='binary', pos_label=0)
-            terrain_warned = any(isinstance(w.message, UndefinedMetricWarning) for w in w_terrain)
-
-        f1 = f1_score(label_flat, pred_flat, zero_division=1)
-        precision = precision_score(label_flat, pred_flat, zero_division=1)
-        tn, fp, fn, tp  = confusion_matrix(label_flat, pred_flat, labels=[0,1]).ravel()
-
-        # iou = jaccard_score(label_flat, pred_flat, zero_division=1, average=None)[2] # I think I need to index at [2] if not masked to 2 classes
-        # f1 = f1_score(label_flat, pred_flat, zero_division=1, average=None)[2]
-        accuracy_list.append(accuracy)
-        precision_list.append(precision)
-        f1_list.append(f1)
-
-        if not ship_warned:
-            ship_iou_list.append(ship_iou)
-        else:
-            ship_iou = np.nan
-            # print("ship prediction and label are both empty")
+                # Save input image, label, and prediction as a single image
+                combined_img = save_combined_image(image, pred, label, data['metadata']['image_name'][0], pred_path, ship_iou)
+                
+                wandb.log({'TEST__' + data['metadata']['image_name'][0].split('/')[-1]: wandb.Image(combined_img,
+                                                                            caption="Input | Ground Truth | Prediction")})
         
-        if not terrain_warned:
-            terrain_iou_list.append(terrain_iou)
-        else:
-            terrain_iou = np.nan 
-        #     print("terrain prediction and label are both empty")
-
-        test_file = test_files[batch_count]
-        # np.save(pred_file_path, pred) # Save numpy file 
-
-        # normalized_data = (data - data.min())/(data.max() - data.min())
-        # colormap = plt.get_cmap('viridis')  # You can replace 'viridis' with your preferred colormap
-        # colored_data = colormap(data)
-
-        if save_images:
-            mask = label != -1
-            pred[mask == 0] = -1 # set areas with no data to -1 for visualization purposes
-            # label[mask == 0] == -1 # optional to show no data mask on label in viz
-
-            img = (255 * image.squeeze().permute(1, 2, 0).cpu().numpy()).astype(np.uint8)
-
-            # Save input image, label, and prediction as a single image
-            save_combined_image(image, pred, label, test_file, pred_path, ship_iou, terrain_iou)
-
-            # Save prediction as npy
-            # np.save(os.path.join(pred_path, os.path.basename(test_file).replace("_image.npy", "_pred.npy")), pred)
-            
-            # Save original image as npy
-            # np.save(os.path.join(pred_path, os.path.basename(test_file)), img)
-            
-            # Save original image as png
-            # img = Image.fromarray((255*image.squeeze().permute(1,2,0).cpu().numpy()).astype(np.uint8))
-            # img.save(os.path.join(pred_path, os.path.basename(test_file).replace("_image.npy", "_image.png"))) # Save image
-            
-            # Save prediction as png
-            # pred_img = Image.fromarray((255*pred[0,...]).astype(np.uint8))
-            # pred_img.save(os.path.join(pred_path, os.path.basename(test_file).replace("_image.npy", "_pred.png"))) # Save image
-            
-            # Save Label as png
-            # label = Image.fromarray((255*label.squeeze()).astype(np.uint8))
-            # label.save(os.path.join(pred_path, os.path.basename(test_file).replace("_image.npy", "_label.png"))) # Save image
-            with open(score_path, "a") as f:
-                f.write(f"{os.path.basename(test_file).replace('_image.npy', '')} - Ship IOU: {ship_iou:.4f} - Terrain IOU: {terrain_iou:.4f} - F1 Score: {f1:.4f} - Accuracy: {accuracy:.4f}\n")
-    
-        batch_count += 1
-
     # After the loop, calculate the averages
     avg_accuracy = np.mean(accuracy_list)
     avg_precision = np.mean(precision_list)
     avg_f1 = np.mean(f1_list)
     avg_ship_iou = np.mean(ship_iou_list)
-    avg_terrain_iou = np.mean(terrain_iou_list)
 
     # Print the averages
-    # print(f"Average Accuracy: {avg_accuracy:.4f}")
-    # print(f"Average Precision: {avg_precision:.4f}")
-    # print(f"Average F1 Score: {avg_f1:.4f}")
-    print(f"Ship IoU: {avg_ship_iou:.4f}")
-    print(f"Terrain IoU: {avg_terrain_iou:.4f}")
-
-    return avg_ship_iou, avg_terrain_iou
+    print(f"Average Accuracy: {avg_accuracy:.4f}")
+    print(f"Average Precision: {avg_precision:.4f}")
+    print(f"Average F1 Score: {avg_f1:.4f}")
+    print(f"Average Ship IoU: {avg_ship_iou:.4f}")
+    
+    wandb.log({"Average Accuracy": avg_accuracy, "Average Precision": avg_precision, "Average F1 Score": avg_f1, "Average Ship IoU": avg_ship_iou})
 
 
 ########
@@ -372,9 +326,11 @@ def evaluate(batch_size):
 
 
 if __name__ == "__main__":
-    EPOCHS = 5000
+    EPOCHS = 7000
     BATCH_SIZE = 32
     LEARNING_RATE = 5e-4
+    USING_HILLSHADE = False
+    USING_INPAINTED = True
     
     wandb.init(
         project="mbes",
@@ -387,21 +343,26 @@ if __name__ == "__main__":
                }
     )
     
-    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
-            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
-            model_name=wandb.run.name,
-            save_path="./model_weights", 
-            num_epochs=EPOCHS, 
-            batch_size=BATCH_SIZE, 
-            lr=LEARNING_RATE,
-            using_hillshade=False,
-            using_inpainted=True)
+    # train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
+    #         val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
+    #         model_name=wandb.run.name,
+    #         model_arch=wandb.run.group,
+    #         save_path="./model_weights", 
+    #         num_epochs=EPOCHS,
+    #         batch_size=BATCH_SIZE, 
+    #         lr=LEARNING_RATE,
+    #         using_hillshade=USING_HILLSHADE,
+    #         using_inpainted=USING_INPAINTED)
 
     # Numerous test functions for evaluation; change test folder, model and save path as needed
-    # test("Test_Ships_Fixed", "Models/cnp_data_5_latest.pt", save_images=True, pred_path="Predictions/synthetic_ships")
-    # test("New_Terrain_Test", "Models/cnp_data_5_latest.pt", save_images=True, pred_path="Predictions/synthetic_terrain") # Test_Final is all ships
-    # test("New_Test_Combined", "Models/cnp_data_5_latest.pt", save_images=True, pred_path="Predictions/synthetic_combined") # Test_Final is all ships
-    # test("Plugin_outputs", "Models/cnp_data_7_e6000.pt", save_images=True, pred_path="Predictions/Plugin_outputs_5")
+    test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_Aux",
+         weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"),
+        model_name=wandb.run.name,
+         model_arch=wandb.run.group,
+         using_hillshade=USING_HILLSHADE, 
+         using_inpainted=USING_INPAINTED, 
+         save_images=True, 
+         pred_path="model_outputs")
 
     # Run all models to compare results in txt file
     # with open("test_log.txt", "w") as f:

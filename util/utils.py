@@ -35,7 +35,7 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
     """
 
     # Convert the image (C, H, W) tensor to (H, W, C) NumPy array and scale to [0,255]
-    img = image.squeeze().permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C)
+    img = image.squeeze().cpu().numpy()  # Convert to (H, W, C)
     img = (255 * img).astype(np.uint8)  # Scale to [0, 255]
     img_pil = Image.fromarray(img)  # Convert to PIL image
 
@@ -76,7 +76,7 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
         except:
             font = ImageFont.load_default()
 
-        text = f"Ship IoU: {ship_iou:.4f} | Terrain IoU: {terrain_iou:.4f}"
+        text = f"Ship IoU: {ship_iou:.4f}"
         bbox = draw.textbbox((0, 0), text, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
@@ -95,6 +95,8 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
     # Save the final combined image
     output_filename = os.path.basename(test_file).replace("_image.npy", "_combined.png")
     combined_img.save(os.path.join(pred_path, output_filename))
+    
+    return combined_img
 
 def save_plot(save_path, data):
     # Create the figuredepth_grid
