@@ -343,18 +343,17 @@ if __name__ == "__main__":
                }
     )
     
-    # train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
-    #         val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
-    #         model_name=wandb.run.name,
-    #         model_arch=wandb.run.group,
-    #         save_path="./model_weights", 
-    #         num_epochs=EPOCHS,
-    #         batch_size=BATCH_SIZE, 
-    #         lr=LEARNING_RATE,
-    #         using_hillshade=USING_HILLSHADE,
-    #         using_inpainted=USING_INPAINTED)
+    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
+            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
+            model_name=wandb.run.name,
+            model_arch=wandb.run.group,
+            save_path="./model_weights", 
+            num_epochs=EPOCHS,
+            batch_size=BATCH_SIZE, 
+            lr=LEARNING_RATE,
+            using_hillshade=USING_HILLSHADE,
+            using_inpainted=USING_INPAINTED)
 
-    # Numerous test functions for evaluation; change test folder, model and save path as needed
     test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_Aux",
          weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"),
         model_name=wandb.run.name,
@@ -363,14 +362,3 @@ if __name__ == "__main__":
          using_inpainted=USING_INPAINTED, 
          save_images=True, 
          pred_path="model_outputs")
-
-    # Run all models to compare results in txt file
-    # with open("test_log.txt", "w") as f:
-    #     for file in sorted(os.listdir("Models")):
-    #         if file.endswith(".pt"):
-    #                 try:
-    #                     with redirect_stdout(f):
-    #                         test("New_Test_Combined", os.path.join("Models",file), save_images=False, pred_path="Predictions/synthetic_combined") # Test_Final is all ships
-    #                 except Exception as e:
-    #                     print("Model:", file)
-    #                     print(f"Error occurred")

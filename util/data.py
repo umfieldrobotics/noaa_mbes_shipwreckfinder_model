@@ -10,7 +10,7 @@ from util.utils import normalize_nonzero
 
 
 class MBESDataset(Dataset):
-    def __init__(self, root_dir, transform=None, byt=False, aug_multiplier=0, using_hillshade=False, using_inpainted=False):
+    def __init__(self, root_dir, transform=None, byt=False, aug_multiplier=0, using_hillshade=False, using_inpainted=False, resize_to_div_16=False):
         self.root_dir = root_dir
         self.transform = transform
         self.byt = byt
@@ -25,7 +25,8 @@ class MBESDataset(Dataset):
             self.original_file_list = [file_name for file_name in os.listdir(os.path.join(root_dir, "original")) if "_image.npy" in file_name] # non inpainted files, we need these to get the mask for the invalid pixels
         else:
             self.file_list = [file_name for file_name in os.listdir(root_dir) if "_image.npy" in file_name]
-        self.resize = transforms.Resize((self.img_size, self.img_size), interpolation=transforms.InterpolationMode.NEAREST)  # Resize to 200 x 200
+        self.resize_dim = ((self.img_size // 32) + 1) * 32  if resize_to_div_16 else self.img_size
+        self.resize = transforms.Resize((self.resize_dim, self.resize_dim), interpolation=transforms.InterpolationMode.NEAREST)
 
         self.expanded_file_list = [(file_name, i) for file_name in self.file_list for i in range(aug_multiplier + 1)]
         
@@ -72,7 +73,7 @@ class MBESDataset(Dataset):
 
         # Resize using nearest neighbor to preserve {-1, 0, 1}
         label = torch.from_numpy(label_np).unsqueeze(0).unsqueeze(0)  # (1, H, W)
-        label = torch.nn.functional.interpolate(label.float(), size=(self.img_size, self.img_size), mode='nearest').squeeze(0).squeeze(0).long()  # (H, W)
+        label = torch.nn.functional.interpolate(label.float(), size=(self.resize_dim, self.resize_dim), mode='nearest').squeeze(0).squeeze(0).long()  # (H, W)
 
         # Temporarily turn -1 → 255 for Albumentations
         label[label == -1] = 255
