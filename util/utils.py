@@ -18,7 +18,7 @@ def clear_directory(directory_path):
         except Exception as e:
             print(f'Failed to delete {file_path}. Reason: {e}')
 
-def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None, terrain_iou=None, divider_width=5):    
+def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None, terrain_iou=None, divider_width=5, saliency_map=None):    
     """
     Saves a single image containing the original image, prediction, and label side by side,
     with thin white vertical dividers between them, and overlays IoU scores.
@@ -39,21 +39,28 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
     img = (255 * img).astype(np.uint8)  # Scale to [0, 255]
     img_pil = Image.fromarray(img)  # Convert to PIL image
 
-    pred_img = Image.fromarray((255 * pred[0, ...]).astype(np.uint8))
-    label_img = Image.fromarray((255 * label.squeeze()).astype(np.uint8))
-    # pred_img = Image.fromarray((127.5 * pred[0, ...]+127.5).astype(np.uint8))
-    # label_img = Image.fromarray((127.5*label.squeeze()+127.5).astype(np.uint8))
+    # pred_img = Image.fromarray((255 * pred[0, ...]).astype(np.uint8))
+    # label_img = Image.fromarray((255 * label.squeeze()).astype(np.uint8))
+    pred_img = Image.fromarray((127.5 * pred[0, ...]+127.5).astype(np.uint8))
+    label_img = Image.fromarray((127.5*label.squeeze()+127.5).astype(np.uint8))
 
     # Ensure all images have the same height
     height = img_pil.height
     pred_img = pred_img.resize((pred_img.width, height))
     label_img = label_img.resize((label_img.width, height))
+    saliency_img = None
+    
+    if saliency_map is not None:
+        saliency_img = Image.fromarray(255 * saliency_map[0])
+        saliency_img = saliency_img.resize((img_pil.width, height))  # Match height & width
 
     # Create a white divider
     divider = Image.new("RGB", (divider_width, height), color=(128, 128, 128))
 
     # Calculate final image width: 3 images + 2 dividers
     combined_width = img_pil.width + pred_img.width + label_img.width + (2 * divider_width)
+    if saliency_map is not None:
+        combined_width += saliency_img.width + divider_width
     combined_img = Image.new("RGB", (combined_width, height), color=(0, 0, 0))
 
     # Paste images with dividers in between
@@ -67,6 +74,11 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
     combined_img.paste(divider, (x_offset, 0))
     x_offset += divider_width
     combined_img.paste(pred_img.convert("RGB"), (x_offset, 0))
+    if saliency_map is not None:
+        x_offset += pred_img.width
+        combined_img.paste(divider, (x_offset, 0))
+        x_offset += divider_width
+        combined_img.paste(saliency_img.convert("RGB"), (x_offset, 0))
 
     # Draw IoU text at bottom center
     if ship_iou is not None or terrain_iou is not None:
@@ -94,7 +106,7 @@ def save_combined_image(image, pred, label, test_file, pred_path, ship_iou=None,
 
     # Save the final combined image
     output_filename = os.path.basename(test_file).replace("_image.npy", "_combined.png")
-    combined_img.save(os.path.join(pred_path, output_filename))
+    pred_img.save(os.path.join(pred_path, output_filename))
     
     return combined_img
 

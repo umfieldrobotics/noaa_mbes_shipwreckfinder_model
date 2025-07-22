@@ -15,7 +15,7 @@ class MBESDataset(Dataset):
         self.transform = transform
         self.byt = byt
         self.aug_multiplier = aug_multiplier  # Number of additional augmented samples per image
-        self.img_size = 200
+        self.img_size = 400
         
         self.using_hillshade = using_hillshade
         self.using_inpainted = using_inpainted
