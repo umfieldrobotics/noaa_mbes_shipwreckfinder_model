@@ -219,39 +219,35 @@ def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_
             label = label.cpu().detach().numpy()
             pred = pred.cpu().detach().numpy()
             
+            # Remove small contours
+            min_area = 150  # adjust this value as needed
+            cleaned_pred = []
+
+            for p in pred:
+                p = p.astype(np.uint8)
+                contours, _ = cv2.findContours(p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cleaned = np.zeros_like(p)
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area >= min_area:
+                        cv2.drawContours(cleaned, [cnt], -1, 1, thickness=cv2.FILLED)
+                cleaned_pred.append(cleaned.astype(np.int32))
+
+            pred = np.stack(cleaned_pred, axis=0)
+
+            pred = np.expand_dims(pred, axis=1)
+            
             valid_data_mask = (label.flatten() != -1)  # Ignore invalid pixels
             label_flat = label.flatten()[valid_data_mask]
             pred_flat = pred.flatten()[valid_data_mask]
-            
-            # Initialize flags
-            ship_warned = False
 
-            # Compute metrics if labels are available
-            accuracy = accuracy_score(label_flat, pred_flat)  # Flatten to 1D arrays for comparison
-
-            # Compute ship IoU and detect warning; don't count IOU if label and pred are both 0's
-            with warnings.catch_warnings(record=True) as w_ship:
-                warnings.simplefilter("always")
-                ship_iou = jaccard_score(label_flat, pred_flat, zero_division="warn", average='binary', pos_label=1)
-                ship_warned = any(isinstance(w.message, UndefinedMetricWarning) for w in w_ship)
-
-            f1 = f1_score(label_flat, pred_flat, zero_division=1)
-            precision = precision_score(label_flat, pred_flat, zero_division=1)
             tn, fp, fn, tp  = confusion_matrix(label_flat, pred_flat, labels=[0,1]).ravel()
             total_tn += tn
             total_fp += fp
             total_fn += fn
             total_tp += tp
-
-            accuracy_list.append(accuracy)
-            precision_list.append(precision)
-            f1_list.append(f1)
-
-            if not ship_warned:
-                ship_iou_list.append(ship_iou)
-            else:
-                ship_iou = np.nan
-                print("ship prediction and label are both empty")
+            
+            iou_ship = tp / (fp + tp + fn)
 
             if save_images:
                 mask = (label != -1)
@@ -259,24 +255,29 @@ def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_
                 label[mask == 0] == -1 # optional to show no data mask on label in viz
 
                 # Save input image, label, and prediction as a single image
-                combined_img = save_combined_image(image, pred, label, data['metadata']['image_name'][0], pred_path, ship_iou)
+                combined_img = save_combined_image(image[0,0,:,:], pred[0], label[0], data['metadata']['image_name'][0], pred_path, iou_ship, saliency_map=saliency_map)
                 
                 wandb.log({'TEST__' + data['metadata']['image_name'][0].split('/')[-1]: wandb.Image(combined_img,
                                                                             caption="Input | Ground Truth | Prediction")})
-        
-    # After the loop, calculate the averages
-    avg_accuracy = np.mean(accuracy_list)
-    avg_precision = np.mean(precision_list)
-    avg_f1 = np.mean(f1_list)
-    avg_ship_iou = np.mean(ship_iou_list)
+            
+        # After the loop, calculate the averages
+        accuracy = total_tp / (total_tp + total_fp + total_fn)
+        precision = total_tp / (total_tp + total_fp)
+        recall = total_tp / (total_tp + total_fn)
+        f1 = 2 * total_tp / (2 * total_tp + total_fp + total_fn)
+        iou_ship = total_tp / (total_fp + total_tp + total_fn)
+        # for terrain, ship tn = terrain tp, ship tp = terrain tn, ship fp = terrain fn, ship fn = terrain fp
+        iou_background = total_tn / (total_fn + total_tn + total_fp)
 
-    # Print the averages
-    print(f"Average Accuracy: {avg_accuracy:.4f}")
-    print(f"Average Precision: {avg_precision:.4f}")
-    print(f"Average F1 Score: {avg_f1:.4f}")
-    print(f"Average Ship IoU: {avg_ship_iou:.4f}")
-    
-    wandb.log({"Average Accuracy": avg_accuracy, "Average Precision": avg_precision, "Average F1 Score": avg_f1, "Average Ship IoU": avg_ship_iou})
+        # Print the averages
+        print(f"Average Accuracy: {accuracy:.4f}")
+        print(f"Average Precision: {precision:.4f}")
+        print(f"Average F1 Score: {f1:.4f}")
+        print(f"Average Recall: {recall:.4f}")
+        print(f"Average Ship IoU: {iou_ship:.4f}")
+        print(f"Average Background IoU: {iou_background:.4f}")
+        
+        wandb.log({"Average Accuracy": accuracy, "Average Precision": precision, "Average F1 Score": f1, "Average Recall": recall, "Average Ship IoU": iou_ship, "Average Background IoU": iou_background})
 
 
 ########
@@ -329,8 +330,8 @@ def evaluate(batch_size):
 
 
 if __name__ == "__main__":
-    EPOCHS = 7000
-    BATCH_SIZE = 32
+    EPOCHS = 12000
+    BATCH_SIZE = 16
     LEARNING_RATE = 5e-4
     L1 = 0.5 # weight for hillshade in loss
     USING_HILLSHADE = True
@@ -348,20 +349,20 @@ if __name__ == "__main__":
                }
     )
     
-    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic_Aux",
-            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic_Aux",
+    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic",
+            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic",
             model_name=wandb.run.name,
             model_arch=wandb.run.group,
-            save_path="./model_weights",
-            num_epochs=EPOCHS, 
+            save_path="./model_weights", 
+            num_epochs=EPOCHS,
             batch_size=BATCH_SIZE, 
             lr=LEARNING_RATE,
             l1=L1,
             using_hillshade=USING_HILLSHADE,
             using_inpainted=USING_INPAINTED)
 
-    test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_Aux", 
-         weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"), 
+    test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_With_Terrain",
+         weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"),
          model_name=wandb.run.name,
          model_arch=wandb.run.group,
          using_hillshade=USING_HILLSHADE, 
