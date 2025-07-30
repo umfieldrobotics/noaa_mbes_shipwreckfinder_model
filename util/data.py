@@ -42,8 +42,8 @@ class MBESDataset(Dataset):
         label_name = image_name.replace("_image.npy", "_label.npy").replace("inpainted", "original")
         
         if self.using_inpainted:
-            original_file_name, _ = self.original_expanded_file_list[idx]
-            original_image_name = os.path.join(self.root_dir, "original", original_file_name)
+            # original_file_name, _ = self.original_expanded_file_list[idx]
+            original_image_name = os.path.join(self.root_dir, "original", file_name)
 
         # --- Load image ---
         image = torch.from_numpy(np.load(image_name)).float()  # (H, W)
