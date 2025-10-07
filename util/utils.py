@@ -120,9 +120,6 @@ def save_plot(save_path, data):
     # Save the figure
     plt.savefig(save_path)
 
-    # Show the figure (optional)
-    # plt.show()
-
 def normalize_nonzero(image):
     """
     Normalizes nonzero values in an image (tensor or numpy array) to the range [0,1].
@@ -180,6 +177,3 @@ def copy_files(src_folder, dst_folder):
             shutil.copy2(src_file, dst_file)  # copy2 preserves metadata
 
     print(f"Copied {count} ship images to {dst_folder}.")
-
-    # print(f"All files copied from {src_folder} to {dst_folder}")
-

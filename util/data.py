@@ -42,8 +42,8 @@ class MBESDataset(Dataset):
         label_name = image_name.replace("_image.npy", "_label.npy").replace("inpainted", "original")
         
         if self.using_inpainted:
-            original_file_name, _ = self.original_expanded_file_list[idx]
-            original_image_name = os.path.join(self.root_dir, "original", original_file_name)
+            # original_file_name, _ = self.original_expanded_file_list[idx]
+            original_image_name = os.path.join(self.root_dir, "original", file_name)
 
         # --- Load image ---
         image = torch.from_numpy(np.load(image_name)).float()  # (H, W)
@@ -114,18 +114,6 @@ class MBESDataset(Dataset):
                 "label_name": label_name
             }
         }
-
-
-        # Save images to confirm augmentations
-        # np.save(os.path.join('QGIS_Chunks', os.path.basename(file_name)), image) # Save image
-        # save_plot(os.path.join('Augmented_Ships', os.path.basename(file_name.replace("_image.npy", "_normalized.png"))), image)
-        # if self.transform:
-        #     img = Image.fromarray((255*image).astype(np.uint8))
-        #     img.save(os.path.join('Augmented_Ships', os.path.basename(file_name.replace("_image.npy", "_augmented.png")))) # Save image
-        #     lab = Image.fromarray((127.5*label.numpy()+127.5).astype(np.uint8)) # scaled for viz purposes 
-        #     lab.save(os.path.join('Augmented_Ships', os.path.basename(file_name.replace("_image.npy", "_augmented_label.png")))) # Save image
-
-        return {'image': image, 'label': label, 'metadata': {"image_name": image_name, "label_name": label_name}}
     
     def compute_hillshade(self, elevation, azimuth=315, altitude=45, cell_size=1.0):
         """

@@ -160,9 +160,9 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
         # Save model (best, latest, and every 1000 epochs)
         curr_save_path = os.path.join(save_path, model_arch, model_name, model_name)
 
-        # Save every 10 epochs (including newly named files every 1000 epochs)
+        # Save every 10 epochs (including newly named files every 200 epochs)
         if (epoch + 1) % 10 == 0:
-            if (epoch + 1) % 1000 == 0:
+            if (epoch + 1) % 200 == 0:
                 torch.save(model.state_dict(), curr_save_path + f"e{epoch + 1}.pt")
             else:
                 torch.save(model.state_dict(), curr_save_path + "_latest.pt")

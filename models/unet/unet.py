@@ -527,7 +527,7 @@ class Unet(nn.Module):
 
     def __init__(self, in_channels, classes):
         super(Unet, self).__init__()
-        self.resnet_encoder = models.resnet34()
+        self.resnet_encoder = models.resnet34(weights='ResNet34_Weights.IMAGENET1K_V1')
         self.resnet_encoder.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         self.activations = {}
 
