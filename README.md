@@ -4,6 +4,10 @@ This repo accompanies the ShipwreckFinder QGIS Plugin repo, which can be found h
 
 The project/tutorial website can be found here: https://sites.google.com/umich.edu/oceans2025-tutorial
 
+The accompanying paper, presented at OCEANS 2025, can be found here: https://arxiv.org/pdf/2509.21386
+
+### Usage
+
 The plugin repo linked above contains instructions for installing the plugin into your QGIS environment, while this repo contains the training and evaluation code for the pre-trained models released as a part of the plugin. 
 
 If you wish to train your own model as the backbone of the QGIS plugin, then take a look at the four "train_" scripts in this repo (four scripts for four different model architectures).
