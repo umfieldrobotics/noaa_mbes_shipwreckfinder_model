@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, jaccard_score, f1_
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 import wandb
 import warnings
@@ -31,6 +32,9 @@ from util.utils import clear_directory, save_combined_image
 #                                                                          #
 # Anja Sheppard, Tyler Smithline                                           #
 ############################################################################
+
+CUDA = 'cuda:1'
+DEVICE = torch.device(CUDA)
 
 bce_loss = nn.BCELoss(reduction='mean')
 ssim_loss = pytorch_ssim.SSIM(window_size=11, size_average=True)
@@ -96,10 +100,10 @@ def normPRED(d):
 # TRAIN #
 #########
 
-def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, batch_size, lr, threshold, using_hillshade, using_inpainted):
+def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, batch_size, lr, threshold, using_hillshade, using_inpainted, scheduler_type='step'):
 
     model = BASNet(3, 1)
-    model.cuda()
+    model.to(DEVICE)
     
     os.makedirs(os.path.join(save_path, model_arch, model_name), exist_ok=True)
 
@@ -125,6 +129,13 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=1)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+    
+    if scheduler_type == 'step':
+        scheduler = StepLR(optimizer, step_size=50, gamma=0.1)  # Reduce LR by 10x every 30 epochs
+    elif scheduler_type == 'plateau':
+        scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)  # Reduce when validation IoU plateaus
+    else:
+        scheduler = None
 
     best_iou = 0
 
@@ -139,7 +150,7 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
             image = torch.hstack([image, image, image])
             label = data['label'].unsqueeze(1).type(torch.FloatTensor)
 
-            image_v, label_v = Variable(image, requires_grad=False).cuda(), Variable(label, requires_grad=False).cuda()
+            image_v, label_v = Variable(image, requires_grad=False).to(DEVICE), Variable(label, requires_grad=False).to(DEVICE)
 
             optimizer.zero_grad()
             
@@ -177,7 +188,7 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
                 image = torch.hstack([image, image, image])
                 label = data['label'].unsqueeze(1).type(torch.FloatTensor)
                 
-                image_v, label_v = Variable(image, requires_grad=False).cuda(), Variable(label, requires_grad=False).cuda()
+                image_v, label_v = Variable(image, requires_grad=False).to(DEVICE), Variable(label, requires_grad=False).to(DEVICE)
 
                 optimizer.zero_grad()
                 
@@ -215,12 +226,23 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
             avg_val_iou = np.mean(val_iou)
             wandb.log({"Validation Loss": avg_val_loss, "Validation Loss Tar": avg_val_tar_loss, "Validation IOU": avg_val_iou})
 
+        # Learning rate scheduling
+        if scheduler is not None:
+            if scheduler_type == 'plateau':
+                if epoch % 25 == 0:
+                    scheduler.step(avg_val_iou)
+            else:
+                scheduler.step()
+                
+        current_lr = optimizer.param_groups[0]['lr']
+        wandb.log({"Learning Rate": current_lr})
+
         # Save model (best, latest, and every 1000 epochs)
         curr_save_path = os.path.join(save_path, model_arch, model_name, model_name)
 
-        # Save every 10 epochs (including newly named files every 1000 epochs)
+        # Save every 10 epochs (including newly named files every 200 epochs)
         if (epoch + 1) % 10 == 0:
-            if (epoch + 1) % 100 == 0:
+            if (epoch + 1) % 200 == 0:
                 torch.save(model.state_dict(), curr_save_path + f"_e{epoch + 1}.pt")
             else:
                 torch.save(model.state_dict(), curr_save_path + "_latest.pt")
@@ -241,7 +263,7 @@ def test(test_path, weight_path, model_name, model_arch, threshold, using_hillsh
     # Load the model
     model = BASNet(3, 1)
     model.load_state_dict(torch.load(weight_path))
-    model.cuda()
+    model.to(DEVICE)
 
     model.eval()
 
@@ -265,7 +287,7 @@ def test(test_path, weight_path, model_name, model_arch, threshold, using_hillsh
         image = torch.hstack([image, image, image])
         label = data['label'].unsqueeze(1).type(torch.FloatTensor)
 
-        image_v = Variable(image, requires_grad=True).cuda()
+        image_v = Variable(image, requires_grad=True).to(DEVICE)
 
         _, d1, _, _, _, _, _, _ = model(image_v)
 
@@ -341,29 +363,31 @@ def test(test_path, weight_path, model_name, model_arch, threshold, using_hillsh
 
 
 if __name__ == "__main__":
-    EPOCHS = 5000
+    EPOCHS = 12000
     BATCH_SIZE = 16
-    LEARNING_RATE = 4e-4
-    THRESHOLD = 0.4
+    LEARNING_RATE = 3e-4
+    THRESHOLD = 0.1
     USING_HILLSHADE = False
     USING_INPAINTED = True
+    LR_SCHEDULER_TYPE = "plateau"
     
     wandb.init(
         project="mbes",
-        # group="basnet",
-        # id="vbty6lsw",
-        resume="must",
+        group="basnet",
+        # id="nz71byba",
+        # resume="must",
         config={
                 "epochs": EPOCHS,
                 "batch_size": BATCH_SIZE,
                 "learning_rate": LEARNING_RATE,
                 "threshold": THRESHOLD,
-                "model_type": "unet"
+                "model_type": "unet",
+                "lr_scheduler_type": LR_SCHEDULER_TYPE
                }
     )
     
-    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic",
-            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic",
+    train(train_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Train_With_Synthetic",
+            val_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Val_With_Synthetic",
             model_name=wandb.run.name,
             model_arch=wandb.run.group,
             save_path="./model_weights",
@@ -372,9 +396,10 @@ if __name__ == "__main__":
             lr=LEARNING_RATE,
             threshold=THRESHOLD,
             using_hillshade=USING_HILLSHADE,
-            using_inpainted=USING_INPAINTED)
+            using_inpainted=USING_INPAINTED,
+            scheduler_type=LR_SCHEDULER_TYPE)
 
-    test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_With_Terrain",
+    test(test_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Test_With_Terrain",
          weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"),
          model_name=wandb.run.name,
          model_arch=wandb.run.group,

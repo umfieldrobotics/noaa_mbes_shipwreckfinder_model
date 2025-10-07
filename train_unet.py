@@ -12,6 +12,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.metrics import accuracy_score, confusion_matrix, jaccard_score, f1_score, precision_score
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR, OneCycleLR
 
 from util.data import MBESDataset
 from models.unet.unet import Unet
@@ -25,15 +26,17 @@ from util.utils import clear_directory, save_combined_image
 # Anja Sheppard, Tyler Smithline                                           #
 ############################################################################
 
+CUDA = 'cuda:3'
+DEVICE = torch.device(CUDA)
 
 #########
 # TRAIN #
 #########
 
-def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, batch_size, lr, using_hillshade, using_inpainted):
+def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, batch_size, lr, using_hillshade, using_inpainted, scheduler_type='step'):
 
     model = Unet(1, 2)
-    model.cuda()
+    model.to(DEVICE)
     
     os.makedirs(os.path.join(save_path, model_arch, model_name), exist_ok=True)
 
@@ -65,7 +68,7 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
     background_count = 0
     total_count = 0
     for data in train_loader:
-        label = data['label'].cuda()
+        label = data['label'].to(DEVICE)
         label_count += (label == 1).sum()
         background_count += (label == 0).sum()
     total_count = background_count # made a separate background variable since masked pixels don't count as background
@@ -78,7 +81,26 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
     print("Ones Count", label_count, "Zeros count:", total_count-label_count)
 
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    ce_loss = torch.nn.CrossEntropyLoss(weight=torch.tensor([weight0, weight1]).cuda(), ignore_index=-1)
+    ce_loss = torch.nn.CrossEntropyLoss(weight=torch.tensor([weight0, weight1]).to(DEVICE), ignore_index=-1)
+    
+    if scheduler_type == 'step':
+        scheduler = StepLR(optim, step_size=50, gamma=0.1)  # Reduce LR by 10x every 30 epochs
+    elif scheduler_type == 'plateau':
+        scheduler = ReduceLROnPlateau(optim, mode='max', factor=0.5, patience=10)  # Reduce when validation IoU plateaus
+    elif scheduler_type == 'onecycle':
+        # OneCycleLR - this is the key addition
+        scheduler = OneCycleLR(
+            optim, 
+            max_lr=lr,  # Peak learning rate (your initial LR)
+            steps_per_epoch=len(train_loader),  # Number of batches per epoch
+            epochs=num_epochs,  # Total epochs
+            pct_start=0.3,  # Percentage of cycle spent increasing LR (30%)
+            anneal_strategy='cos',  # Cosine annealing
+            div_factor=25.0,  # Initial LR = max_lr/div_factor
+            final_div_factor=1e4  # Final LR = initial_lr/final_div_factor
+        )
+    else:
+        scheduler = None
     
     best_iou = 0
 
@@ -88,8 +110,8 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
         train_loss = []
         train_iou = []
         for data in train_loader:
-            image = data['image'].cuda()
-            label = data['label'].cuda()
+            image = data['image'].to(DEVICE)
+            label = data['label'].to(DEVICE)
 
             optim.zero_grad()
 
@@ -108,6 +130,10 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
             iou = jaccard_score(label_flat, pred_flat, zero_division=1)
             loss.backward()
             optim.step()
+            
+            if scheduler is not None and scheduler_type == 'onecycle':
+                scheduler.step()
+            
             train_loss.append(loss.item())
             train_iou.append(iou)
 
@@ -127,8 +153,8 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
         if epoch % 25 == 0:
             with torch.no_grad():
                 for idx, data in enumerate(val_loader):
-                    image = data['image'].cuda()
-                    label = data['label'].cuda()
+                    image = data['image'].to(DEVICE)
+                    label = data['label'].to(DEVICE)
                     # image = (image - image.min(dim=(1,2,3)))/(image.max(dim=(1,2,3)) - image.min(dim=(1,2,3)))
                     pred = model(image)
                     loss = ce_loss(pred, label.long())
@@ -156,6 +182,17 @@ def train(train_path, val_path, model_name, model_arch, save_path, num_epochs, b
             avg_val_loss = np.mean(val_loss)
             avg_val_iou = np.mean(val_iou)
             wandb.log({"Validation Loss": avg_val_loss, "Validation IOU": avg_val_iou})
+            
+        # Learning rate scheduling
+        if scheduler is not None and scheduler_type != 'onecycle':
+            if scheduler_type == 'plateau':
+                if epoch % 25 == 0:
+                    scheduler.step(avg_val_iou)
+            else:
+                scheduler.step()
+                
+        current_lr = optim.param_groups[0]['lr']
+        wandb.log({"Learning Rate": current_lr})
 
         # Save model (best, latest, and every 1000 epochs)
         curr_save_path = os.path.join(save_path, model_arch, model_name, model_name)
@@ -183,7 +220,7 @@ def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_
     # Load the model
     model = Unet(1, 2)
     model.load_state_dict(torch.load(weight_path))
-    model.cuda()
+    model.to(DEVICE)
 
     model.eval()
 
@@ -207,8 +244,8 @@ def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_
 
     with torch.no_grad():
         for data in test_loader:
-            image = data['image'].cuda()
-            label = data['label'].cuda()
+            image = data['image'].to(DEVICE)
+            label = data['label'].to(DEVICE)
 
             pred = model(image)
             pred = pred.argmax(dim=1)
@@ -281,7 +318,7 @@ def test(test_path, weight_path, model_name, model_arch, using_hillshade, using_
 
 def evaluate(batch_size):
     model = Unet(3, 2)
-    model.cuda()
+    model.to(DEVICE)
 
     # Load dataset and split into train/validation sets
     # dataset = MBESDataset("/mnt/syn/advaiths/datasets/mbes_data/real_data/Train_Final_filtered", byt=False)
@@ -296,8 +333,8 @@ def evaluate(batch_size):
     total_count = 0
     mean_depths = []
     for data in train_loader:
-        label = data['label'].cuda()
-        image = data['image'].cuda()
+        label = data['label'].to(DEVICE)
+        image = data['image'].to(DEVICE)
         print("Data shape", image.shape, label.shape)
         masked_image = label*image
         # if(label_count == 0):
@@ -326,10 +363,11 @@ def evaluate(batch_size):
 
 if __name__ == "__main__":
     EPOCHS = 12000
-    BATCH_SIZE = 16
+    BATCH_SIZE = 64
     LEARNING_RATE = 5e-4
     USING_HILLSHADE = False
     USING_INPAINTED = True
+    LR_SCHEDULER_TYPE = "onecycle"
     
     wandb.init(
         project="mbes",
@@ -338,12 +376,13 @@ if __name__ == "__main__":
                 "epochs": EPOCHS,
                 "batch_size": BATCH_SIZE,
                 "learning_rate": LEARNING_RATE,
-                "model_type": "unet"
+                "model_type": "unet",
+                "lr_scheduler_type": LR_SCHEDULER_TYPE
                }
     )
     
-    train(train_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Train_With_Synthetic",
-            val_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Val_With_Synthetic",
+    train(train_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Train_With_Synthetic",
+            val_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Val_With_Synthetic",
             model_name=wandb.run.name,
             model_arch=wandb.run.group,
             save_path="./model_weights", 
@@ -351,9 +390,10 @@ if __name__ == "__main__":
             batch_size=BATCH_SIZE, 
             lr=LEARNING_RATE,
             using_hillshade=USING_HILLSHADE,
-            using_inpainted=USING_INPAINTED)
+            using_inpainted=USING_INPAINTED,
+            scheduler_type=LR_SCHEDULER_TYPE)
 
-    test(test_path="/frog-drive/noaa_multibeam/Synthetic_Dataset/Test_With_Terrain",
+    test(test_path="/mnt/ws-frb/users/anjashep/NOAA_MBES/DATA/Test_With_Terrain",
          weight_path=os.path.join("model_weights", wandb.run.group, wandb.run.name, wandb.run.name+"_best.pt"),
         model_name=wandb.run.name,
          model_arch=wandb.run.group,
